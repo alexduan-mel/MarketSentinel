@@ -25,6 +25,7 @@ jobs:
           entry_point: 'gcf_handler'
           region: 'australia-southeast1' 
           service_account_email: ${{ secrets.GCP_SA_EMAIL }}
+          source_dir: 'python-ai'
           env_vars: |
             SLACK_WEBHOOK_URL=${{ secrets.SLACK_WEBHOOK_URL }}
  
