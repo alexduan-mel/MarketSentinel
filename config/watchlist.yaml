@@ -1,0 +1,35 @@
+# SentinelStream Global Watchlist
+# This file is shared by Python (Ingestion) and Java (Execution)
+assets:
+  - symbol: AAPL
+    name: "Apple Inc."
+    sector: "Technology"
+    enabled: true
+    keywords:
+      - "apple"
+      - "iphone"
+      - "ipad"
+      - "macbook"
+      - "tim cook"
+      - "ios"
+      - "app store"
+      - "airpods"
+      - "apple watch"
+      - "cupertino"
+
+  - symbol: GOOGL
+    name: "Alphabet Inc."
+    sector: "Technology"
+    enabled: true
+    keywords:
+      - "google"
+      - "alphabet"
+      - "android"
+      - "chrome"
+      - "youtube"
+      - "sundar pichai"
+      - "google cloud"
+      - "search engine"
+      - "pixel"
+      - "waymo"
+

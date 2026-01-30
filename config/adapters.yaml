@@ -1,0 +1,11 @@
+# Sentinel-Ingest Operational Settings
+adapters:
+  yahoo_rss:
+    enabled: true
+    interval_seconds: 300 # 5 minutes (standard for RSS)
+    max_history: 50       # Only pull latest 50 items per check
+
+  finnhub:
+    enabled: false        # Set to true when you add your API key
+    interval_seconds: 15  # Faster polling for API sources
+    api_key_env: "FINNHUB_KEY"
