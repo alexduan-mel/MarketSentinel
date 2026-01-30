@@ -21,7 +21,7 @@ jobs:
         uses: 'google-github-actions/deploy-cloud-functions@v1'
         with:
           name: 'integration-poc'
-          runtime: 'python39'
+          runtime: 'python312'
           entry_point: 'gcf_handler'
           region: 'australia-southeast1' 
           service_account_email: ${{ secrets.GCP_SA_EMAIL }}
