@@ -1,27 +1,21 @@
 services:
-  java-core:
-    build:
-      context: services/java-core
-    ports:
-      - "8080:8080"
-    environment:
-      - JAVA_OPTS=${JAVA_OPTS:-}
+  # java-core:
+  #   build:
+  #     context: services/java-core
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - JAVA_OPTS=${JAVA_OPTS:-}
 
-  python-ai:
-    build:
-      context: services/python-ai
-    ports:
-      - "8000:8000"
+  # storage-worker:
+  #   build:
+  #     context: services/storage-worker
 
-  storage-worker:
-    build:
-      context: services/storage-worker
-
-  dashboard:
-    build:
-      context: services/dashboard
-    ports:
-      - "3000:80"
+  # dashboard:
+  #   build:
+  #     context: services/dashboard
+  #   ports:
+  #     - "3000:80"
 
   timescaledb:
     image: timescale/timescaledb:latest-pg14
@@ -30,9 +24,10 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
       - POSTGRES_DB=${POSTGRES_DB:-sentinel}
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - timescaledb_data:/var/lib/postgresql/data
+      - ./infra/local/timescaledb/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql
 
   redis:
     image: redis:7-alpine
@@ -40,6 +35,15 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+
+  python-ai:
+    build:
+      context: services/python-ai
+    ports:
+      - "8000:8000"
+    depends_on:
+      - timescaledb
+      - redis
 
 volumes:
   timescaledb_data:
