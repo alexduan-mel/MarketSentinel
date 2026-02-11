@@ -109,6 +109,10 @@ The system can be started locally using Docker Compose.
 ```bash
 docker compose up --build
 
+docker compose down -v
+docker compose up -d
+
+
 # Check Java service
 curl http://localhost:8080
 
@@ -122,9 +126,13 @@ docker compose logs -f storage-worker
 docker compose exec redis redis-cli LLEN news_ingest_queue
 
 # Inspect database
-docker compose exec timescaledb psql -U sentinel -d sentinelstream \
-  -c "SELECT COUNT(*) FROM news_events;"
-
-
+# docker compose exec timescaledb psql -U sentinel -d sentinelstream \
+#   -c "SELECT COUNT(*) FROM news_events;"
+# connect to timescaledb container
+docker compose exec timescaledb psql -U postgres -d sentinel
+# list users
+\du 
+# list tables
+\dt
 
 
