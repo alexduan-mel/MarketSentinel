@@ -12,7 +12,7 @@ import psycopg2
 from dotenv import load_dotenv
 
 from ingestion.finnhub_client import FinnhubError, fetch_company_news
-from ingestion.news_store import insert_news_events
+from ingestion.news_store import upsert_news_event
 from ingestion.normalizer import NormalizationError, normalize_finnhub
 from ingestion.raw_store import insert_raw_items, mark_raw_failed, mark_raw_normalized, select_raw_items
 from jobs.publisher import publish_job
@@ -198,20 +198,21 @@ def main() -> int:
         for raw_row in raw_rows:
             try:
                 event = normalize_finnhub(raw_row.raw_payload, trace_id, ingested_at)
-                inserted = insert_news_events(conn, [event])
-                news_inserted_count += inserted
-                job_inserted = publish_job(conn, event.news_id, trace_id)
+                event_id, inserted = upsert_news_event(conn, event)
+                if inserted:
+                    news_inserted_count += 1
+                job_inserted = publish_job(conn, event_id, trace_id)
                 if job_inserted:
                     jobs_enqueued_count += 1
                 else:
                     jobs_skipped_count += 1
-                mark_raw_normalized(conn, raw_row.raw_id)
+                mark_raw_normalized(conn, raw_row.id)
                 normalized_ok_count += 1
             except NormalizationError as exc:
-                mark_raw_failed(conn, raw_row.raw_id, str(exc))
+                mark_raw_failed(conn, raw_row.id, str(exc))
                 normalized_failed_count += 1
             except Exception as exc:  # noqa: BLE001
-                mark_raw_failed(conn, raw_row.raw_id, f"unexpected_error: {exc}")
+                mark_raw_failed(conn, raw_row.id, f"unexpected_error: {exc}")
                 normalized_failed_count += 1
 
     logger.info(

@@ -1,3 +1,4 @@
+import hashlib
 import os
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -31,14 +32,15 @@ def db_conn():
 
 
 def test_publish_job_dedup(db_conn):
-    news_id = f"test-{uuid4()}"
+    news_id = hashlib.sha256(uuid4().hex.encode("utf-8")).hexdigest()
     trace_id = uuid4()
     now = datetime.now(timezone.utc)
 
     with db_conn.cursor() as cursor:
         cursor.execute(
             "INSERT INTO news_events (news_id, trace_id, source, published_at, ingested_at, title, url, content, tickers, raw_payload) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "RETURNING id",
             (
                 news_id,
                 str(trace_id),
@@ -52,22 +54,23 @@ def test_publish_job_dedup(db_conn):
                 {},
             ),
         )
+        news_event_id = cursor.fetchone()[0]
     db_conn.commit()
 
-    first = publish_job(db_conn, news_id, trace_id)
-    second = publish_job(db_conn, news_id, trace_id)
+    first = publish_job(db_conn, news_event_id, trace_id)
+    second = publish_job(db_conn, news_event_id, trace_id)
     assert first is True
     assert second is False
 
     with db_conn.cursor() as cursor:
         cursor.execute(
-            "SELECT COUNT(*) FROM analysis_jobs WHERE news_id = %s AND job_type = %s",
-            (news_id, "llm_analysis"),
+            "SELECT COUNT(*), MIN(id) FROM analysis_jobs WHERE news_event_id = %s AND job_type = %s",
+            (news_event_id, "llm_analysis"),
         )
         count = cursor.fetchone()[0]
     assert count == 1
 
     with db_conn.cursor() as cursor:
-        cursor.execute("DELETE FROM analysis_jobs WHERE news_id = %s", (news_id,))
-        cursor.execute("DELETE FROM news_events WHERE news_id = %s", (news_id,))
+        cursor.execute("DELETE FROM analysis_jobs WHERE news_event_id = %s", (news_event_id,))
+        cursor.execute("DELETE FROM news_events WHERE id = %s", (news_event_id,))
     db_conn.commit()

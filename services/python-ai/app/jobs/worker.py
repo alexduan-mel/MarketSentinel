@@ -11,11 +11,13 @@ from typing import Iterable
 
 import psycopg2
 
+from analysis.service import analyze_news_event
 
 @dataclass(frozen=True)
 class JobRow:
-    job_id: str
-    news_id: str
+    id: int
+    job_uuid: str
+    news_event_id: int
     job_type: str
     trace_id: str
     attempts: int
@@ -64,7 +66,7 @@ def _connect_db():
 def _claim_jobs(conn, batch_size: int, worker_id: str) -> list[JobRow]:
     sql = (
         "WITH cte AS ("
-        "  SELECT job_id, news_id, job_type, trace_id, attempts "
+        "  SELECT id, job_uuid, news_event_id, job_type, trace_id, attempts "
         "  FROM analysis_jobs "
         "  WHERE status = 'pending' "
         "    AND next_run_at <= NOW() "
@@ -76,8 +78,8 @@ def _claim_jobs(conn, batch_size: int, worker_id: str) -> list[JobRow]:
         "UPDATE analysis_jobs j "
         "SET status = 'running', locked_at = NOW(), locked_by = %s, updated_at = NOW() "
         "FROM cte "
-        "WHERE j.job_id = cte.job_id "
-        "RETURNING j.job_id::text, j.news_id, j.job_type, j.trace_id::text, cte.attempts"
+        "WHERE j.id = cte.id "
+        "RETURNING j.id, j.job_uuid::text, j.news_event_id, j.job_type, j.trace_id::text, cte.attempts"
     )
     with conn.cursor() as cursor:
         cursor.execute(sql, (batch_size, worker_id))
@@ -86,35 +88,35 @@ def _claim_jobs(conn, batch_size: int, worker_id: str) -> list[JobRow]:
     return [JobRow(*row) for row in rows]
 
 
-def _load_news_event(conn, news_id: str) -> tuple[str, str]:
-    sql = "SELECT news_id, title FROM news_events WHERE news_id = %s"
+def _load_news_event(conn, news_event_id: int) -> tuple[int, str, str]:
+    sql = "SELECT id, news_id, title FROM news_events WHERE id = %s"
     with conn.cursor() as cursor:
-        cursor.execute(sql, (news_id,))
+        cursor.execute(sql, (news_event_id,))
         row = cursor.fetchone()
     if not row:
-        raise RuntimeError(f"news_event_not_found: {news_id}")
-    return row[0], row[1]
+        raise RuntimeError(f"news_event_not_found: {news_event_id}")
+    return row[0], row[1], row[2]
 
 
-def _mark_done(conn, job_id: str) -> None:
+def _mark_done(conn, job_id: int) -> None:
     sql = (
         "UPDATE analysis_jobs "
         "SET status = 'done', updated_at = NOW(), last_error = NULL "
-        "WHERE job_id = %s"
+        "WHERE id = %s"
     )
     with conn.cursor() as cursor:
         cursor.execute(sql, (job_id,))
     conn.commit()
 
 
-def _mark_failed(conn, job_id: str, attempts: int, error: str) -> None:
+def _mark_failed(conn, job_id: int, attempts: int, error: str) -> None:
     next_attempts = attempts + 1
     backoff_seconds = min((2 ** next_attempts) * 10, 300)
     sql = (
         "UPDATE analysis_jobs "
         "SET status = 'failed', attempts = attempts + 1, last_error = %s, "
         "next_run_at = NOW() + (%s || ' seconds')::interval, updated_at = NOW() "
-        "WHERE job_id = %s"
+        "WHERE id = %s"
     )
     with conn.cursor() as cursor:
         cursor.execute(sql, (error[:500], backoff_seconds, job_id))
@@ -124,11 +126,38 @@ def _mark_failed(conn, job_id: str, attempts: int, error: str) -> None:
 def _process_jobs(conn, jobs: Iterable[JobRow], logger: logging.Logger) -> None:
     for job in jobs:
         try:
-            news_id, _title = _load_news_event(conn, job.news_id)
-            logger.info("processed job %s for news_id %s", job.job_id, news_id)
-            _mark_done(conn, job.job_id)
+            if job.job_type == "llm_analysis":
+                result = analyze_news_event(job.news_event_id)
+                if result.get("status") == "succeeded":
+                    _mark_done(conn, job.id)
+                    logger.info(
+                        "processed job %s job_uuid %s for news_event_id %s",
+                        job.id,
+                        job.job_uuid,
+                        job.news_event_id,
+                    )
+                else:
+                    _mark_failed(conn, job.id, job.attempts, result.get("error_message", "analysis_failed"))
+                    logger.error(
+                        "job_failed job_id=%s job_uuid=%s news_event_id=%s error=%s",
+                        job.id,
+                        job.job_uuid,
+                        job.news_event_id,
+                        result.get("error_message"),
+                    )
+                continue
+
+            event_id, news_id, _title = _load_news_event(conn, job.news_event_id)
+            logger.info(
+                "processed job %s job_uuid %s for news_event_id %s news_id %s",
+                job.id,
+                job.job_uuid,
+                event_id,
+                news_id,
+            )
+            _mark_done(conn, job.id)
         except Exception as exc:  # noqa: BLE001
-            _mark_failed(conn, job.job_id, job.attempts, str(exc))
+            _mark_failed(conn, job.id, job.attempts, str(exc))
 
 
 def main() -> int:

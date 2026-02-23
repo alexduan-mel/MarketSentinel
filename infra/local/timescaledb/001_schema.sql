@@ -9,7 +9,8 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- 1) Tickers (dimension table)
 -- ----------------------------
 CREATE TABLE IF NOT EXISTS tickers (
-  ticker_id      SERIAL PRIMARY KEY,
+  id             BIGSERIAL PRIMARY KEY,
+  ticker_key     INTEGER,                 -- legacy surrogate id
   symbol         TEXT NOT NULL UNIQUE,   -- e.g., 'AAPL'
   name           TEXT,                   -- e.g., 'Apple Inc.'
   exchange       TEXT,                   -- e.g., 'NASDAQ'
@@ -17,15 +18,19 @@ CREATE TABLE IF NOT EXISTS tickers (
 );
 
 COMMENT ON TABLE tickers IS 'Ticker dimension table (basic entity registry)';
+COMMENT ON COLUMN tickers.id IS 'Surrogate primary key';
+COMMENT ON COLUMN tickers.ticker_key IS 'Legacy ticker id (former primary key)';
 COMMENT ON COLUMN tickers.symbol IS 'Ticker symbol, e.g., AAPL';
 COMMENT ON COLUMN tickers.name IS 'Company name (optional)';
 COMMENT ON COLUMN tickers.exchange IS 'Exchange (optional)';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tickers_ticker_key ON tickers (ticker_key);
 
 -- ------------------------------------------------------
 -- 2) News events (append-only event table, normalized)
 -- ------------------------------------------------------
 CREATE TABLE IF NOT EXISTS news_events (
-  news_id         TEXT PRIMARY KEY,
+  id              BIGSERIAL PRIMARY KEY,
+  news_id         CHAR(64) NOT NULL,
   trace_id        UUID NOT NULL,          -- correlation ID per pipeline run
   source          TEXT NOT NULL,          -- e.g., finnhub / polygon / rss
   source_event_id TEXT,                  -- provider-specific ID if available
@@ -41,10 +46,12 @@ CREATE TABLE IF NOT EXISTS news_events (
 
   raw_payload     JSONB,                  -- raw provider payload for debugging/replay
 
+  CONSTRAINT uq_news_events_news_id UNIQUE (news_id),
   CONSTRAINT uq_news_source_url UNIQUE (source, url)
 );
 
 COMMENT ON TABLE news_events IS 'Normalized news events ingested from external sources';
+COMMENT ON COLUMN news_events.id IS 'Surrogate primary key';
 COMMENT ON COLUMN news_events.news_id IS 'Deterministic unique ID (recommended: sha256(source|url))';
 COMMENT ON COLUMN news_events.trace_id IS 'Correlation ID for a single pipeline run';
 COMMENT ON COLUMN news_events.source IS 'News provider name';
@@ -58,12 +65,14 @@ COMMENT ON COLUMN news_events.raw_payload IS 'Raw provider payload stored for de
 CREATE INDEX IF NOT EXISTS idx_news_published_at ON news_events (published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_news_source ON news_events (source);
 CREATE INDEX IF NOT EXISTS idx_news_tickers_gin ON news_events USING GIN (tickers);
+CREATE INDEX IF NOT EXISTS idx_news_news_id ON news_events (news_id);
 
 -- ------------------------------------------------------
 -- 3) Raw news items (staging for replayable normalization)
 -- ------------------------------------------------------
 CREATE TABLE IF NOT EXISTS raw_news_items (
-  raw_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id           BIGSERIAL PRIMARY KEY,
+  raw_uuid     UUID NOT NULL DEFAULT gen_random_uuid(),
   source       TEXT NOT NULL,                 -- provider name (e.g., finnhub)
   trace_id     UUID NOT NULL,                 -- correlation ID for the fetch run
   fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- time the raw payload was fetched
@@ -79,11 +88,13 @@ CREATE TABLE IF NOT EXISTS raw_news_items (
 
   raw_payload  JSONB NOT NULL,
 
+  CONSTRAINT uq_raw_news_raw_uuid UNIQUE (raw_uuid),
   CONSTRAINT uq_raw_news_source_dedup UNIQUE (source, dedup_key)
 );
 
 COMMENT ON TABLE raw_news_items IS 'Raw news payloads staged for replayable normalization';
-COMMENT ON COLUMN raw_news_items.raw_id IS 'Unique id for a raw news payload';
+COMMENT ON COLUMN raw_news_items.id IS 'Surrogate primary key';
+COMMENT ON COLUMN raw_news_items.raw_uuid IS 'Stable UUID for a raw news payload';
 COMMENT ON COLUMN raw_news_items.source IS 'Provider name (e.g., finnhub)';
 COMMENT ON COLUMN raw_news_items.trace_id IS 'Correlation id for a single fetch run';
 COMMENT ON COLUMN raw_news_items.fetched_at IS 'Time the raw payload was fetched';
@@ -109,8 +120,9 @@ CREATE INDEX IF NOT EXISTS idx_raw_news_payload_gin
 -- 4) Analysis jobs (DB-backed work queue)
 -- ------------------------------------------------------
 CREATE TABLE IF NOT EXISTS analysis_jobs (
-  job_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  news_id     TEXT NOT NULL REFERENCES news_events(news_id) ON DELETE CASCADE,
+  id          BIGSERIAL PRIMARY KEY,
+  job_uuid    UUID NOT NULL DEFAULT gen_random_uuid(),
+  news_event_id BIGINT NOT NULL REFERENCES news_events(id) ON DELETE CASCADE,
   trace_id    UUID NOT NULL,
   job_type    TEXT NOT NULL, -- e.g., llm_analysis, fetch_content
   status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','running','done','failed')),
@@ -122,12 +134,14 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-  CONSTRAINT uq_analysis_jobs_news_type UNIQUE (news_id, job_type)
+  CONSTRAINT uq_analysis_jobs_job_uuid UNIQUE (job_uuid),
+  CONSTRAINT uq_analysis_jobs_news_type UNIQUE (news_event_id, job_type)
 );
 
 COMMENT ON TABLE analysis_jobs IS 'DB-backed job queue for async processing';
-COMMENT ON COLUMN analysis_jobs.job_id IS 'Unique id for a job';
-COMMENT ON COLUMN analysis_jobs.news_id IS 'News event id to process';
+COMMENT ON COLUMN analysis_jobs.id IS 'Surrogate primary key';
+COMMENT ON COLUMN analysis_jobs.job_uuid IS 'Stable UUID for a job';
+COMMENT ON COLUMN analysis_jobs.news_event_id IS 'News event id to process';
 COMMENT ON COLUMN analysis_jobs.trace_id IS 'Correlation id for publishing this job';
 COMMENT ON COLUMN analysis_jobs.job_type IS 'Job type (e.g., llm_analysis, fetch_content)';
 COMMENT ON COLUMN analysis_jobs.status IS 'Job status: pending | running | done | failed';
@@ -145,44 +159,73 @@ CREATE INDEX IF NOT EXISTS idx_analysis_jobs_status_next_run
 CREATE INDEX IF NOT EXISTS idx_analysis_jobs_created_at
   ON analysis_jobs (created_at);
 
+CREATE INDEX IF NOT EXISTS idx_analysis_jobs_job_uuid
+  ON analysis_jobs (job_uuid);
+
 -- ------------------------------------------------------
 -- 5) LLM analyses (structured output + raw output)
 -- ------------------------------------------------------
 CREATE TABLE IF NOT EXISTS llm_analyses (
-  analysis_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id              BIGSERIAL PRIMARY KEY,
+  analysis_uuid   UUID NOT NULL DEFAULT gen_random_uuid(),
 
-  news_id         TEXT NOT NULL REFERENCES news_events(news_id) ON DELETE CASCADE,
+  news_event_id   BIGINT NOT NULL REFERENCES news_events(id) ON DELETE CASCADE,
   trace_id        UUID NOT NULL,          -- same trace_id used in this processing run
 
   provider        TEXT NOT NULL,          -- openai / gemini
   model           TEXT NOT NULL,          -- exact model name
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  status          TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending','succeeded','failed')),
+  error_message   TEXT,                   -- error summary when failed
 
-  sentiment       TEXT NOT NULL CHECK (sentiment IN ('positive', 'negative', 'neutral')),
-  confidence      DOUBLE PRECISION NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+  sentiment       TEXT CHECK (sentiment IN ('positive', 'negative', 'neutral')),
+  confidence      DOUBLE PRECISION CHECK (confidence >= 0 AND confidence <= 1),
   impact_score    DOUBLE PRECISION CHECK (impact_score IS NULL OR (impact_score >= 0 AND impact_score <= 1)),
 
   entities        JSONB NOT NULL DEFAULT '[]'::JSONB,  -- [{symbol,name?,confidence?},...]
-  summary         TEXT NOT NULL,                       -- short summary
+  summary         TEXT,                                -- reasoning summary (<= 280 chars)
   rationale       TEXT,                                -- optional short reasoning
 
   raw_output      JSONB,                               -- raw model output
 
-  CONSTRAINT uq_analysis_run UNIQUE (news_id, trace_id, provider, model)
+  CONSTRAINT uq_analysis_uuid UNIQUE (analysis_uuid),
+  CONSTRAINT uq_analysis_news_event UNIQUE (news_event_id)
 );
 
 COMMENT ON TABLE llm_analyses IS 'LLM analysis results (raw output + parsed fields)';
-COMMENT ON COLUMN llm_analyses.news_id IS 'FK to news_events.news_id';
+COMMENT ON COLUMN llm_analyses.id IS 'Surrogate primary key';
+COMMENT ON COLUMN llm_analyses.analysis_uuid IS 'Stable UUID for an analysis row';
+COMMENT ON COLUMN llm_analyses.news_event_id IS 'FK to news_events.id';
 COMMENT ON COLUMN llm_analyses.trace_id IS 'Correlation ID for the processing run';
 COMMENT ON COLUMN llm_analyses.provider IS 'LLM provider name';
 COMMENT ON COLUMN llm_analyses.model IS 'Exact model identifier';
+COMMENT ON COLUMN llm_analyses.status IS 'pending | succeeded | failed';
+COMMENT ON COLUMN llm_analyses.error_message IS 'Last error message for failed analysis';
 COMMENT ON COLUMN llm_analyses.sentiment IS 'positive | negative | neutral';
 COMMENT ON COLUMN llm_analyses.confidence IS 'Overall confidence in [0,1]';
 COMMENT ON COLUMN llm_analyses.impact_score IS 'Optional impact score in [0,1]';
 COMMENT ON COLUMN llm_analyses.entities IS 'Extracted entities/tickers as JSON array';
 COMMENT ON COLUMN llm_analyses.raw_output IS 'Raw model output for debugging/replay';
 
-CREATE INDEX IF NOT EXISTS idx_analysis_news_id ON llm_analyses (news_id);
+CREATE INDEX IF NOT EXISTS idx_analysis_news_event_id ON llm_analyses (news_event_id);
 CREATE INDEX IF NOT EXISTS idx_analysis_created_at ON llm_analyses (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_analysis_sentiment ON llm_analyses (sentiment);
 CREATE INDEX IF NOT EXISTS idx_analysis_entities_gin ON llm_analyses USING GIN (entities);
+
+-- ------------------------------------------------------
+-- 6) Analysis tickers (join table)
+-- ------------------------------------------------------
+CREATE TABLE IF NOT EXISTS analysis_tickers (
+  id          BIGSERIAL PRIMARY KEY,
+  analysis_id BIGINT NOT NULL REFERENCES llm_analyses(id) ON DELETE CASCADE,
+  ticker      TEXT NOT NULL
+);
+
+COMMENT ON TABLE analysis_tickers IS 'Tickers extracted per analysis row';
+COMMENT ON COLUMN analysis_tickers.analysis_id IS 'FK to llm_analyses.id';
+COMMENT ON COLUMN analysis_tickers.ticker IS 'Extracted ticker symbol';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_analysis_tickers
+  ON analysis_tickers (analysis_id, ticker);

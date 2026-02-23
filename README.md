@@ -119,6 +119,17 @@ curl http://localhost:8080
 # Check Python AI service
 curl http://localhost:8000
 
+### LLM Analysis Endpoint
+
+The Python AI service exposes:
+
+```
+POST /news-events/{id}/analysis
+```
+
+This triggers LLM analysis for a `news_events.id` (BIGINT) and returns the parsed result.  
+Configure the provider via environment variables (see `.env.example`): `LLM_PROVIDER` (openai|gemini), model names, timeouts, and API keys.
+
 # Monitor storage worker logs
 docker compose logs -f storage-worker
 
@@ -134,5 +145,3 @@ docker compose exec timescaledb psql -U postgres -d sentinel
 \du 
 # list tables
 \dt
-
-

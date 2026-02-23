@@ -2,7 +2,7 @@
 
 ## Overview
 
-In M1, "publishing" means writing a row into the `analysis_jobs` table in Postgres/TimescaleDB. This table acts as a DB-backed queue. Workers claim jobs with `SELECT ... FOR UPDATE SKIP LOCKED`, so multiple workers can safely run in parallel without processing the same job.
+In M1, "publishing" means writing a row into the `analysis_jobs` table in Postgres/TimescaleDB. Jobs use an auto-increment `analysis_jobs.id` as the primary key and a `job_uuid` for stable tracking, and reference `news_events.id` via `news_event_id` (the surrogate PK). `news_id` remains a unique business identifier for deduplication. Workers claim jobs with `SELECT ... FOR UPDATE SKIP LOCKED`, so multiple workers can safely run in parallel without processing the same job.
 
 ## Run locally
 
