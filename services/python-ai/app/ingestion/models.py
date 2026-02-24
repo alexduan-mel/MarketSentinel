@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 
 class NewsEvent(BaseModel):
+    id: int | None = None
     news_id: str
     trace_id: UUID
     source: str = Field(default="finnhub")

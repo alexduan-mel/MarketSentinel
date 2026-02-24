@@ -12,7 +12,7 @@ import psycopg2
 from dotenv import load_dotenv
 
 from ingestion.finnhub_client import FinnhubError, fetch_company_news
-from ingestion.news_store import insert_news_events
+from ingestion.news_store import upsert_news_event
 from ingestion.normalizer import NormalizationError, normalize_finnhub
 from ingestion.raw_store import insert_raw_items, mark_raw_failed, mark_raw_normalized, select_raw_items
 from jobs.publisher import publish_job
@@ -93,6 +93,57 @@ def _fetch_ticker_symbols(conn, symbols: list[str] | None) -> list[str]:
     return list(dict.fromkeys([row[0] for row in rows if row[0]]))
 
 
+def _parse_finnhub_timestamp(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    if isinstance(value, str):
+        if value.isdigit():
+            return datetime.fromtimestamp(int(value), tz=timezone.utc)
+        iso = value.strip()
+        if iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(iso)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    return None
+
+
+def _limit_items_per_day(
+    items: list[dict],
+    limit: int,
+    local_tz: ZoneInfo,
+) -> tuple[list[dict], int]:
+    if limit <= 0:
+        return items, 0
+    ranked: list[tuple[datetime | None, dict]] = []
+    for item in items:
+        ts = item.get("datetime") or item.get("published_at")
+        ranked.append((_parse_finnhub_timestamp(ts), item))
+    ranked.sort(
+        key=lambda pair: pair[0] or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    counts: dict[str, int] = {}
+    kept: list[dict] = []
+    for published_at, item in ranked:
+        if published_at:
+            date_key = published_at.astimezone(local_tz).date().isoformat()
+        else:
+            date_key = "unknown"
+        if counts.get(date_key, 0) >= limit:
+            continue
+        counts[date_key] = counts.get(date_key, 0) + 1
+        kept.append(item)
+    dropped = len(items) - len(kept)
+    return kept, dropped
+
+
 def main() -> int:
     _configure_logging()
     args = _parse_args()
@@ -140,6 +191,7 @@ def main() -> int:
     fetched_count = 0
     raw_inserted_count = 0
     raw_updated_count = 0
+    max_per_ticker_day = 50
 
     with _connect_db() as conn:
         if not args.replay_only:
@@ -173,7 +225,16 @@ def main() -> int:
                             exc,
                         )
                         continue
-                    raw_items.extend(items)
+                    limited_items, dropped = _limit_items_per_day(items, max_per_ticker_day, nyc_tz)
+                    if dropped:
+                        logger.info(
+                            "finnhub_limit_applied trace_id=%s ticker=%s limit=%s dropped=%s",
+                            trace_id,
+                            symbol,
+                            max_per_ticker_day,
+                            dropped,
+                        )
+                    raw_items.extend(limited_items)
 
                 fetched_count = len(raw_items)
                 raw_inserted_count, raw_updated_count = insert_raw_items(
@@ -198,20 +259,21 @@ def main() -> int:
         for raw_row in raw_rows:
             try:
                 event = normalize_finnhub(raw_row.raw_payload, trace_id, ingested_at)
-                inserted = insert_news_events(conn, [event])
-                news_inserted_count += inserted
-                job_inserted = publish_job(conn, event.news_id, trace_id)
+                event_id, inserted = upsert_news_event(conn, event)
+                if inserted:
+                    news_inserted_count += 1
+                job_inserted = publish_job(conn, event_id, trace_id)
                 if job_inserted:
                     jobs_enqueued_count += 1
                 else:
                     jobs_skipped_count += 1
-                mark_raw_normalized(conn, raw_row.raw_id)
+                mark_raw_normalized(conn, raw_row.id)
                 normalized_ok_count += 1
             except NormalizationError as exc:
-                mark_raw_failed(conn, raw_row.raw_id, str(exc))
+                mark_raw_failed(conn, raw_row.id, str(exc))
                 normalized_failed_count += 1
             except Exception as exc:  # noqa: BLE001
-                mark_raw_failed(conn, raw_row.raw_id, f"unexpected_error: {exc}")
+                mark_raw_failed(conn, raw_row.id, f"unexpected_error: {exc}")
                 normalized_failed_count += 1
 
     logger.info(

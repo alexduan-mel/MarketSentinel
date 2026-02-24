@@ -13,7 +13,7 @@ from ingestion.url_utils import canonicalize_url
 
 @dataclass(frozen=True)
 class RawNewsRow:
-    raw_id: str
+    id: int
     raw_payload: dict[str, Any]
 
 
@@ -106,7 +106,7 @@ def insert_raw_items(
 
 def select_raw_items(conn, source: str, limit: int) -> list[RawNewsRow]:
     sql = (
-        "SELECT raw_id::text, raw_payload "
+        "SELECT id, raw_payload "
         "FROM raw_news_items "
         "WHERE source = %s "
         "AND status IN ('fetched','failed') "
@@ -117,25 +117,25 @@ def select_raw_items(conn, source: str, limit: int) -> list[RawNewsRow]:
     with conn.cursor() as cursor:
         cursor.execute(sql, (source, limit))
         rows = cursor.fetchall()
-    return [RawNewsRow(raw_id=row[0], raw_payload=row[1]) for row in rows]
+    return [RawNewsRow(id=row[0], raw_payload=row[1]) for row in rows]
 
 
-def mark_raw_normalized(conn, raw_id: str) -> None:
+def mark_raw_normalized(conn, raw_id: int) -> None:
     sql = (
         "UPDATE raw_news_items "
         "SET status = 'normalized', attempts = attempts + 1, last_error = NULL "
-        "WHERE raw_id = %s"
+        "WHERE id = %s"
     )
     with conn.cursor() as cursor:
         cursor.execute(sql, (raw_id,))
     conn.commit()
 
 
-def mark_raw_failed(conn, raw_id: str, error: str) -> None:
+def mark_raw_failed(conn, raw_id: int, error: str) -> None:
     sql = (
         "UPDATE raw_news_items "
         "SET status = 'failed', attempts = attempts + 1, last_error = %s "
-        "WHERE raw_id = %s"
+        "WHERE id = %s"
     )
     with conn.cursor() as cursor:
         cursor.execute(sql, (error, raw_id))
