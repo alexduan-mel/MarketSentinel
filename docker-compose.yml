@@ -44,24 +44,40 @@ services:
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - INGEST_CRON_SCHEDULE=${INGEST_CRON_SCHEDULE}
     ports:
       - "8000:8000"
     depends_on:
       - timescaledb
       - redis
 
-  # analysis-worker:
-  #   build:
-  #     context: services/python-ai
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     - OPENAI_API_KEY=${OPENAI_API_KEY}
-  #     - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-  #   depends_on:
-  #     - timescaledb
-  #     - redis
-  #   command: ["python", "-m", "jobs.worker"]
+  scheduler:
+    build:
+      context: services/python-ai
+    env_file:
+      - .env
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+    command: ["/app/cron/run-supercronic.sh"]
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+    volumes:
+      - ./cron:/app/cron:ro
+
+  analysis-worker:
+    build:
+      context: services/python-ai
+    env_file:
+      - .env
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+    depends_on:
+      - timescaledb
+      - redis
+    command: ["python", "-m", "jobs.worker"]
 
 volumes:
   timescaledb_data:
